@@ -63,9 +63,9 @@ class LMDataset(Dataset):
         # Default root is empty string, so we look in hw4_data_subset/hw4p1_data/{partition}
         root = config.get("root", "")
         if root:
-            self.text_dir = os.path.join(root, "hw4_data_subset", "hw4p1_data", partition)
+            self.text_dir = os.path.join(root, partition)
         else:
-            self.text_dir = os.path.join("hw4_data_subset", "hw4p1_data", partition)
+            self.text_dir = os.path.join(partition)
 
         # TODO: Get all text files in the text directory in sorted order  
         all_files = os.listdir(self.text_dir)

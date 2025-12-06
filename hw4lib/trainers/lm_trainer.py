@@ -319,6 +319,41 @@ class LMTrainer(BaseTrainer):
     # ======================================================================
     #                           GENERATION
     # ======================================================================
+    def evaluate(self, test_dataloader):
+        """
+        Evaluate the model on the test set.
+        
+        Args:
+            test_dataloader: DataLoader for test data
+        Returns:
+            Tuple[Dict[str, float], Dict[str, Dict[str, Dict]]]: A tuple containing:
+                - test_metrics: Test metrics
+                - generation_results: Generation results for each config
+        """
+        test_metrics, test_attn = self._validate_epoch(test_dataloader)
+
+        # Log metrics
+        metrics = {
+            'test': test_metrics
+        }
+        self._log_metrics(metrics, self.current_epoch)  
+
+        # Save attention plots
+        test_attn_keys = list(test_attn.keys())
+        self._save_attention_plot(test_attn[test_attn_keys[0]][0], self.current_epoch, "test_self")
+
+        # Generate with evaluation configs and collect results
+        generation_results = {}
+        eval_configs = self._get_evaluation_generation_configs()
+        for config_name, config in eval_configs.items():
+            try:
+                gen_results = self.generate(test_dataloader, generation_config=config)
+                generation_results[config_name] = gen_results
+                self._save_generated_text(gen_results, f'test_epoch_{self.current_epoch}_{config_name}')
+            except Exception as e:
+                print(f"Could not generate results for {config_name}: {e}")
+                continue
+        return test_metrics, generation_results
     def generate(self, dataloader, generation_config=None):
         """
         Generate text using greedy decoding.

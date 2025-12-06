@@ -125,94 +125,119 @@ class SequenceGenerator:
     # BEAM SEARCH (correct + HW-compatible)
     # ----------------------------------------------------------------------
     def generate_beam(self, x, beam_width, temperature=1.0, repeat_penalty=1.0):
+        """
+        Vectorized beam search implementation following the pseudocode.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len)
+            beam_width: Number of beams to maintain
+            temperature: Scaling factor for logits
+            repeat_penalty: Penalty factor for repeated tokens
+            
+        Returns:
+            x: Generated sequences of shape (batch_size, beam_width, final_seq_len)
+            scores: Cumulative scores of shape (batch_size, beam_width)
+        """
         if not torch.is_tensor(x):
             raise TypeError("x must be tensor")
         if x.dim() != 2:
-            raise ValueError("x must be 2D")
+            raise ValueError("x must be 2D (batch, seq)")
         if beam_width < 1:
             raise ValueError("beam_width >= 1 required")
         if self.max_length < x.size(1):
             raise ValueError("max_length too small")
 
-        batch = x.size(0)
+        batch_size = x.size(0)
         device = x.device
+        vocab_size = self.tokenizer.vocab_size
 
-        # beams[b] = [(seq_tensor, score_float)]
-        beams = [
-            [(x[b:b+1], 0.0)]
-            for b in range(batch)
-        ]
+        # Initialize scores: (batch_size, beam_width)
+        scores = torch.zeros(batch_size, beam_width, device=device)
+        
+        # Initialize finished flags: (batch_size, beam_width)
+        finished = torch.zeros(batch_size, beam_width, dtype=torch.bool, device=device)
 
-        finished = [
-            [False] * beam_width
-            for _ in range(batch)
-        ]
+        # Step 0: Compute initial logits and select top beam_width tokens
+        logits = self.score_fn(x)  # (batch_size, vocab_size)
+        logits = self._apply_repeat_penalty(logits, x, repeat_penalty)
+        logits = logits / temperature
+        log_probs = torch.log_softmax(logits, dim=-1)  # (batch_size, vocab_size)
 
-        # ---- expand step by step ----
-        for _ in range(self.max_length - x.size(1)):
-            all_done = True
-            new_beams = [[] for _ in range(batch)]
+        # Select top beam_width tokens
+        top_scores, top_tokens = torch.topk(log_probs, beam_width, dim=-1)  # (batch_size, beam_width)
+        scores = top_scores  # (batch_size, beam_width)
 
-            for b in range(batch):
-                candidates = []
+        # Expand x along beam dimension: (batch_size, seq_len) -> (batch_size, beam_width, seq_len)
+        x = x.unsqueeze(1).expand(batch_size, beam_width, -1)  # (batch_size, beam_width, seq_len)
+        
+        # Append next tokens: (batch_size, beam_width, seq_len+1)
+        x = torch.cat([x, top_tokens.unsqueeze(-1)], dim=-1)
+        
+        # Update finished flags
+        finished = (top_tokens == self.tokenizer.eos_id)
 
-                for i, (seq, score) in enumerate(beams[b]):
-                    # Keep finished beams unchanged
-                    if finished[b][i]:
-                        candidates.append((seq, score, i))
-                        continue
-
-                    # At least one not finished
-                    all_done = False
-
-                    # Predict next
-                    logits = self._score_fn_with_batch(seq, b)
-                    logits = self._apply_repeat_penalty(logits, seq, repeat_penalty)
-                    logits = logits / temperature
-                    log_probs = torch.log_softmax(logits, dim=-1)
-
-                    top_lp, top_ids = torch.topk(log_probs, beam_width, dim=-1)
-
-                    for k in range(beam_width):
-                        next_id = top_ids[0, k]
-                        new_score = score + top_lp[0, k].item()
-                        new_seq = torch.cat([seq, next_id.view(1, 1)], dim=1)
-                        candidates.append((new_seq, new_score, i))
-
-                # choose top beams
-                candidates.sort(key=lambda x: -x[1])
-                chosen = candidates[:beam_width]
-                new_beams[b] = [(s, sc) for (s, sc, _) in chosen]
-
-                # update finished flags
-                finished[b] = [
-                    seq[0, -1].item() == self.tokenizer.eos_id
-                    for (seq, _) in new_beams[b]
-                ]
-
-            beams = new_beams
-            if all_done:
+        # Main loop
+        for t in range(1, self.max_length - x.size(-1) + 1):
+            if finished.all():
                 break
 
-        # ------------------------------------------------------------------
-        # COLLATE RESULT
-        # ------------------------------------------------------------------
-        max_len = max(seq.size(1) for b in beams for (seq, _) in b)
+            # Compute logits for each beam
+            # Reshape to process all beams at once: (batch_size * beam_width, seq_len)
+            x_flat = x.view(batch_size * beam_width, -1)
+            logits = self.score_fn(x_flat)  # (batch_size * beam_width, vocab_size)
+            
+            # Reshape back: (batch_size, beam_width, vocab_size)
+            logits = logits.view(batch_size, beam_width, vocab_size)
+            
+            # Apply repeat penalty
+            logits = self._apply_repeat_penalty(logits, x, repeat_penalty)
+            logits = logits / temperature
+            log_probs = torch.log_softmax(logits, dim=-1)  # (batch_size, beam_width, vocab_size)
 
-        out_seqs = torch.full(
-            (batch, beam_width, max_len),
-            self.tokenizer.pad_id,
-            dtype=torch.long,
-            device=device
-        )
-        out_scores = torch.zeros(batch, beam_width, device=device)
+            # Mask finished beams by setting their log_probs to very negative except for PAD token
+            mask = finished.unsqueeze(-1).expand(-1, -1, vocab_size)  # (batch_size, beam_width, vocab_size)
+            log_probs = torch.where(mask, torch.full_like(log_probs, float('-inf')), log_probs)
+            # Allow PAD token for finished beams
+            log_probs[finished, self.tokenizer.pad_id] = 0.0
 
-        for b in range(batch):
-            for i, (seq, sc) in enumerate(beams[b]):
-                out_scores[b, i] = sc
-                out_seqs[b, i, :seq.size(1)] = seq
+            # Compute cumulative scores: (batch_size, beam_width, vocab_size)
+            # Expand scores for broadcasting
+            cum_scores = scores.unsqueeze(-1) + log_probs  # (batch_size, beam_width, vocab_size)
 
-        return out_seqs, out_scores
+            # Flatten for beam selection: (batch_size, beam_width * vocab_size)
+            cum_scores_flat = cum_scores.view(batch_size, -1)
+
+            # Select top beam_width candidates
+            top_scores, top_indices = torch.topk(cum_scores_flat, beam_width, dim=-1)  # (batch_size, beam_width)
+            
+            # Update scores
+            scores = top_scores
+
+            # Re-map to get beam indices and token ids
+            beam_indices = top_indices // vocab_size  # (batch_size, beam_width)
+            next_tokens = top_indices % vocab_size    # (batch_size, beam_width)
+
+            # Reorder x based on beam_indices
+            # Use gather to select the correct beams
+            batch_idx = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, beam_width)
+            x = x[batch_idx, beam_indices]  # (batch_size, beam_width, seq_len)
+            
+            # Reorder finished flags
+            finished = finished[batch_idx, beam_indices]  # (batch_size, beam_width)
+
+            # Append next tokens
+            x = torch.cat([x, next_tokens.unsqueeze(-1)], dim=-1)  # (batch_size, beam_width, seq_len+1)
+
+            # Update finished flags
+            finished = finished | (next_tokens == self.tokenizer.eos_id)
+
+        # Sort sequences in descending order of scores
+        sorted_scores, sorted_indices = torch.sort(scores, dim=-1, descending=True)
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, beam_width)
+        x = x[batch_idx, sorted_indices]
+        scores = sorted_scores
+
+        return x, scores
 
     # ----------------------------------------------------------------------
     # Sampling (already correct)
