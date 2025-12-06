@@ -119,10 +119,10 @@ class BaseTrainer(ABC):
         """Full training loop."""
         pass
 
-    # @abstractmethod
-    # def evaluate(self, dataloader) -> Dict[str, float]:
-    #     """Evaluation loop."""
-    #     pass
+    @abstractmethod
+    def evaluate(self, dataloader) -> Dict[str, float]:
+        """Evaluation loop."""
+        pass
 
 
     def _init_experiment(self, run_name: str, config_file: str):
