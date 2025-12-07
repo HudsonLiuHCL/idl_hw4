@@ -208,6 +208,12 @@ class DecoderOnlyTransformer(nn.Module):
 ## -------------------------------------------------------------------------------------------------
 ## Encoder-Decoder Transformer
 ## -------------------------------------------------------------------------------------------------
+
+
+
+
+
+
 class EncoderDecoderTransformer(nn.Module):
     def __init__(
             self,
@@ -251,7 +257,7 @@ class EncoderDecoderTransformer(nn.Module):
 
         self.source_embedding = SpeechEmbedding(
             input_dim=input_dim,
-            d_model=d_model,
+            output_dim=d_model,
             time_reduction=time_reduction,
             reduction_method=reduction_method,
             dropout=dropout
@@ -259,7 +265,7 @@ class EncoderDecoderTransformer(nn.Module):
 
         self.target_embedding = nn.Embedding(num_classes, d_model)
 
-        self.positional_encoding = PositionalEncoding(d_model, max_len, dropout)
+        self.positional_encoding = PositionalEncoding(d_model, max_len)
 
         self.final_linear = nn.Linear(d_model, num_classes)
 
@@ -285,7 +291,8 @@ class EncoderDecoderTransformer(nn.Module):
         
         x_enc = self.dropout(x_enc)
 
-        pad_mask_src = PadMask(x_enc_lengths, x_enc.size(1)).to(x_enc.device)
+        # PadMask expects: (padded_input, lengths) - tensor first, then lengths
+        pad_mask_src = PadMask(x_enc, x_enc_lengths).to(x_enc.device)
 
         running_att = {}
         for i in range(self.num_encoder_layers):
@@ -314,12 +321,14 @@ class EncoderDecoderTransformer(nn.Module):
     ) -> Tuple[torch.Tensor, dict]:
         pad_mask_tgt = None
         if target_lengths is not None:
-            pad_mask_tgt = PadMask(target_lengths, padded_targets.size(1)).to(padded_targets.device)
+            # PadMask expects: (padded_input, lengths) - tensor first, then lengths
+            pad_mask_tgt = PadMask(padded_targets, target_lengths).to(padded_targets.device)
 
         if pad_mask_tgt is None and self.training:
             warnings.warn("pad_mask_tgt is None, unless you are using the decoder as a standalone model or doing inference, you should provide target_lengths")
 
-        causal_mask = CausalMask(padded_targets.size(1)).to(padded_targets.device)
+        # CausalMask expects the padded_input tensor, not just the size
+        causal_mask = CausalMask(padded_targets).to(padded_targets.device)
 
         x_dec = self.target_embedding(padded_targets)
 
@@ -463,28 +472,6 @@ class EncoderDecoderTransformer(nn.Module):
         print(f"\nTotal parameters: {total_params:,}")
         print(f"\nTotal trainable: {total_trainable:,}")
 
-## -------------------------------------------------------------------------------------------------
-## Test Cases
-## -------------------------------------------------------------------------------------------------
 
-def get_decoder_only_inputs(max_len: int = 300, num_classes: int = 10000):
-    batch_size = 8
-    padded_targets = torch.randint(0, num_classes, (batch_size, max_len))
-    source_lengths = torch.ones(batch_size) * max_len
-    return padded_targets, source_lengths
-
-
-def get_encoder_decoder_inputs(max_len: int = 300, num_classes: int = 10000):
-    batch_size = 8
-    padded_targets = torch.randint(0, num_classes, (batch_size, max_len))
-    source_lengths = torch.ones(batch_size) * max_len
-    return padded_targets, source_lengths
-
-
-def test_decoder_only(num_layers: int = 12, num_heads: int = 8, d_model: int = 512, d_ff: int = 2048, dropout: float = 0.1, max_len: int = 300, num_classes: int = 1000):
-    padded_targets, target_lengths = get_decoder_only_inputs(max_len, num_classes)
-    model = DecoderOnlyTransformer(num_layers, d_model, num_heads, d_ff, dropout, max_len, num_classes)
-    summary(model, input_data=[padded_targets, target_lengths])
-
-if __name__ == "__main__":
-    test_decoder_only()
+# Additional classes if needed (DecoderOnlyTransformer, etc.) would go here
+# Test functions would go here as well
